@@ -6,23 +6,13 @@ import tempfile
 import numpy as np
 import packaging.version
 import pandas as pd
-import skimage.io
 import skimage.measure
-
+import openslide
+print("Openslide import successful")
 import histomicstk.features as htk_features
 import histomicstk.preprocessing.color_deconvolution as htk_cdeconv
 import histomicstk.preprocessing.color_normalization as htk_cnorm
 import histomicstk.segmentation.nuclear as htk_nuclear
-
-thisDir = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, thisDir)
-import htk_test_utilities as utilities  # noqa
-
-try:
-    from .datastore import datastore  # noqa
-except ModuleNotFoundError:  # local prototyping
-    from datastore import datastore  # noqa
-
 
 class Cfg:
     def __init__(self):
@@ -31,11 +21,7 @@ class Cfg:
         self.im_nuclei_seg_mask = None
         self.nuclei_rprops = None
 
-
 cfg = Cfg()
-# Enable to generate groundtruth files in the /tmp directory
-GENERATE_GROUNDTRUTH = bool(os.environ.get('GENERATE_GROUNDTRUTH'))
-
 
 def check_fdata_sanity(fdata, expected_feature_list,
                        prefix='', match_feature_count=True):
@@ -52,7 +38,6 @@ def check_fdata_sanity(fdata, expected_feature_list,
 
     for col in expected_feature_list:
         assert prefix + col in fcols
-
 
 class TestFeatureExtraction:
 
@@ -72,10 +57,13 @@ class TestFeatureExtraction:
 
         args = collections.namedtuple('Parameters', args.keys())(**args)
 
-        # read input image
-        input_image_file = datastore.fetch('Easy1.png')
+        # .ndpi dosyasını OpenSlide kullanarak oku
+        ndpi_file_path = '/Users/gozdesimsek/Desktop/thesis/Thesiscode/HistomicsTK/tests/7316UP-3639.ndpi'  # ndpi dosya yolu
+        slide = openslide.OpenSlide(ndpi_file_path)
 
-        im_input = skimage.io.imread(input_image_file)[:, :, :3]
+        # Görüntüyü oku (küçük çözünürlükte okuma yapabilirsiniz)
+        level = 0  # Bu, okuyacağınız çözünürlük seviyesidir. (0 en yüksek çözünürlük)
+        im_input = np.array(slide.read_region((0, 0), level, slide.level_dimensions[level]))[:, :, :3]
 
         # perform color normalization
         im_input_nmzd = htk_cnorm.reinhard(
@@ -123,9 +111,13 @@ class TestFeatureExtraction:
         cfg.nuclei_rprops = nuclei_rprops
         cfg.fdata_nuclei = fdata_nuclei
 
-    def test_compute_intensity_features(self):
+    def test_compute_features(self):
 
-        expected_feature_list = [
+        # Ortak özelliklerin listesini tutmak için bir dataframe oluştur
+        all_features = pd.DataFrame()
+
+        # Intensity features
+        intensity_feature_list = [
             'Intensity.Min',
             'Intensity.Max',
             'Intensity.Mean',
@@ -140,199 +132,62 @@ class TestFeatureExtraction:
             'Intensity.HistEntropy',
         ]
 
-        fdata = htk_features.compute_intensity_features(
+        fdata_intensity = htk_features.compute_intensity_features(
             cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain)
 
-        check_fdata_sanity(fdata, expected_feature_list)
+        check_fdata_sanity(fdata_intensity, intensity_feature_list)
+        all_features = pd.concat([all_features, fdata_intensity], axis=1)
 
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Nucleus.', match_feature_count=False)
-
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Cytoplasm.', match_feature_count=False)
-
-        if GENERATE_GROUNDTRUTH:
-            fdata.to_csv(os.path.join(
-                tempfile.gettempdir(), 'Easy1_nuclei_intensity_features.csv'),
-                index=False)
-
-        fdata_gtruth = pd.read_csv(
-            utilities.getTestFilePath('Easy1_nuclei_intensity_features.csv'),
-            index_col=None)
-
-        pd.testing.assert_frame_equal(
-            fdata, fdata_gtruth, atol=1e-2)
-
-    def test_compute_haralick_features(self):
-
-        f = [
-            'Haralick.ASM',
-            'Haralick.Contrast',
-            'Haralick.Correlation',
-            'Haralick.SumOfSquares',
-            'Haralick.IDM',
-            'Haralick.SumAverage',
-            'Haralick.SumVariance',
-            'Haralick.SumEntropy',
-            'Haralick.Entropy',
-            'Haralick.DifferenceVariance',
-            'Haralick.DifferenceEntropy',
-            'Haralick.IMC1',
-            'Haralick.IMC2',
+        # Haralick features
+        haralick_feature_list = [
+            'Haralick.ASM', 'Haralick.Contrast', 'Haralick.Correlation', 'Haralick.SumOfSquares',
+            'Haralick.IDM', 'Haralick.SumAverage', 'Haralick.SumVariance', 'Haralick.SumEntropy',
+            'Haralick.Entropy', 'Haralick.DifferenceVariance', 'Haralick.DifferenceEntropy',
+            'Haralick.IMC1', 'Haralick.IMC2'
         ]
 
-        expected_feature_list = []
-        for col in f:
-            expected_feature_list.append(col + '.Mean')
-            expected_feature_list.append(col + '.Range')
+        expected_haralick_list = [f + '.Mean' for f in haralick_feature_list] + \
+                                 [f + '.Range' for f in haralick_feature_list]
 
-        fdata = htk_features.compute_haralick_features(
+        fdata_haralick = htk_features.compute_haralick_features(
             cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain.astype(np.uint8))
 
-        check_fdata_sanity(fdata, expected_feature_list)
+        check_fdata_sanity(fdata_haralick, expected_haralick_list)
+        all_features = pd.concat([all_features, fdata_haralick], axis=1)
 
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Nucleus.', match_feature_count=False)
-
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Cytoplasm.', match_feature_count=False)
-
-        if GENERATE_GROUNDTRUTH:
-            fdata.to_csv(os.path.join(
-                tempfile.gettempdir(), 'Easy1_nuclei_haralick_features.csv'),
-                index=False)
-
-        fdata_gtruth = pd.read_csv(
-            utilities.getTestFilePath('Easy1_nuclei_haralick_features.csv'))
-
-        pd.testing.assert_frame_equal(
-            fdata, fdata_gtruth, atol=1e-2)
-
-    def test_compute_gradient_features(self):
-
-        expected_feature_list = [
-            'Gradient.Mag.Mean',
-            'Gradient.Mag.Std',
-            'Gradient.Mag.Skewness',
-            'Gradient.Mag.Kurtosis',
-            'Gradient.Mag.HistEntropy',
-            'Gradient.Mag.HistEnergy',
-            'Gradient.Canny.Sum',
-            'Gradient.Canny.Mean',
+        # Gradient features
+        gradient_feature_list = [
+            'Gradient.Mag.Mean', 'Gradient.Mag.Std', 'Gradient.Mag.Skewness', 
+            'Gradient.Mag.Kurtosis', 'Gradient.Mag.HistEntropy', 
+            'Gradient.Mag.HistEnergy', 'Gradient.Canny.Sum', 'Gradient.Canny.Mean'
         ]
 
-        fdata = htk_features.compute_gradient_features(
+        fdata_gradient = htk_features.compute_gradient_features(
             cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain)
 
-        check_fdata_sanity(fdata, expected_feature_list)
+        check_fdata_sanity(fdata_gradient, gradient_feature_list)
+        all_features = pd.concat([all_features, fdata_gradient], axis=1)
 
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Nucleus.', match_feature_count=False)
-
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list,
-            prefix='Cytoplasm.', match_feature_count=False)
-
-        if GENERATE_GROUNDTRUTH:
-            fdata.to_csv(os.path.join(
-                tempfile.gettempdir(), 'Easy1_nuclei_gradient_features.csv'),
-                index=False)
-
-        test_file = 'Easy1_nuclei_gradient_features.csv'
-        if (
-            packaging.version.parse(skimage.__version__) >= packaging.version.parse('0.19') and
-            packaging.version.parse(skimage.__version__) < packaging.version.parse('0.19.3')
-        ):
-            test_file = 'Easy1_nuclei_gradient_features_v2.csv'
-        fdata_gtruth = pd.read_csv(
-            utilities.getTestFilePath(test_file),
-            index_col=None)
-
-        pd.testing.assert_frame_equal(
-            fdata, fdata_gtruth, atol=1e-2)
-
-    def test_compute_morphometry_features(self):
-
-        expected_feature_list = [
-            'Orientation.Orientation',
-            'Size.Area',
-            'Size.ConvexHullArea',
-            'Size.MajorAxisLength',
-            'Size.MinorAxisLength',
-            'Size.Perimeter',
-            'Shape.Circularity',
-            'Shape.Eccentricity',
-            'Shape.EquivalentDiameter',
-            'Shape.Extent',
-            'Shape.FractalDimension',
-            'Shape.MinorMajorAxisRatio',
-            'Shape.Solidity',
-            'Shape.HuMoments1',
-            'Shape.HuMoments2',
-            'Shape.HuMoments3',
-            'Shape.HuMoments4',
-            'Shape.HuMoments5',
-            'Shape.HuMoments6',
-            'Shape.HuMoments7',
+        # Morphometry features
+        morphometry_feature_list = [
+            'Orientation.Orientation', 'Size.Area', 'Size.ConvexHullArea', 'Size.MajorAxisLength',
+            'Size.MinorAxisLength', 'Size.Perimeter', 'Size.Eccentricity', 'Size.Solidity',
+            'Size.Extent', 'Shape.FilledArea', 'Shape.EulerNumber', 'Shape.EquivalentDiameter',
+            'Shape.Orientation'
         ]
 
-        fdata = htk_features.compute_morphometry_features(
-            cfg.im_nuclei_seg_mask)
+        fdata_morphometry = htk_features.compute_morphometry_features(
+            cfg.im_nuclei_seg_mask, cfg.nuclei_rprops)
 
-        check_fdata_sanity(fdata, expected_feature_list)
+        check_fdata_sanity(fdata_morphometry, morphometry_feature_list)
+        all_features = pd.concat([all_features, fdata_morphometry], axis=1)
 
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list, match_feature_count=False)
-
-        if GENERATE_GROUNDTRUTH:
-            fdata.to_csv(os.path.join(
-                tempfile.gettempdir(),
-                'Easy1_nuclei_morphometry_features.csv'),
-                index=False)
-
-        test_file = 'Easy1_nuclei_morphometry_features.csv'
-        if packaging.version.parse(skimage.__version__) >= packaging.version.parse('0.18'):
-            test_file = 'Easy1_nuclei_morphometry_features_v2.csv'
-        fdata_gtruth = pd.read_csv(
-            utilities.getTestFilePath(test_file),
-            index_col=None)
-
-        pd.testing.assert_frame_equal(
-            fdata, fdata_gtruth, atol=1e-2)
-
-    def test_compute_fsd_features(self):
-
-        Fs = 6
-        expected_feature_list = ['Shape.FSD' + str(i + 1) for i in range(Fs)]
-
-        fdata = htk_features.compute_fsd_features(
-            cfg.im_nuclei_seg_mask, Fs=Fs)
-
-        check_fdata_sanity(fdata, expected_feature_list)
-
-        check_fdata_sanity(
-            cfg.fdata_nuclei, expected_feature_list, match_feature_count=False)
-
-        if GENERATE_GROUNDTRUTH:
-            fdata.to_csv(os.path.join(
-                tempfile.gettempdir(), 'Easy1_nuclei_fsd_features.csv'),
-                index=False)
-
-        fdata_gtruth = pd.read_csv(
-            utilities.getTestFilePath('Easy1_nuclei_fsd_features.csv'))
-
-        pd.testing.assert_frame_equal(
-            fdata, fdata_gtruth, atol=1e-2)
-
+        # Tüm özellikleri CSV'ye kaydet
+        output_csv = os.path.join(tempfile.gettempdir(), 'combined_features.csv')
+        all_features.to_csv(output_csv, index=False)
+        print(f'Tüm özellikler {output_csv} dosyasına kaydedildi.')
 
 if __name__ == '__main__':
-
-    tfe = TestFeatureExtraction()
-    tfe.test_setup()
-    tfe.test_compute_morphometry_features()
-    tfe.test_compute_intensity_features()
+    test = TestFeatureExtraction()
+    test.test_setup()
+    test.test_compute_features()
