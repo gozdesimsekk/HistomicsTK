@@ -1,14 +1,10 @@
 import collections
 import os
-import sys
-import tempfile
-
-import numpy as np
-import packaging.version
 import pandas as pd
+import skimage.io
 import skimage.measure
-import openslide
-print("Openslide import successful")
+import numpy as np
+
 import histomicstk.features as htk_features
 import histomicstk.preprocessing.color_deconvolution as htk_cdeconv
 import histomicstk.preprocessing.color_normalization as htk_cnorm
@@ -23,70 +19,33 @@ class Cfg:
 
 cfg = Cfg()
 
-def check_fdata_sanity(fdata, expected_feature_list,
-                       prefix='', match_feature_count=True):
+class FeatureExtraction:
+    def __init__(self):
+        self.intensity_features = None
+        self.morphometry_features = None
+        self.halalick_features = None
+        self.gradient_features = None
+        self.fsd_features = None
 
-    assert len(cfg.nuclei_rprops) == fdata.shape[0]
+    def setup_image(self, input_image_file, args):
+        im_input = skimage.io.imread(input_image_file)[:, :, :3]
+        
+        # Color normalization
+        im_input_nmzd = htk_cnorm.reinhard(im_input, args.reference_mu_lab, args.reference_std_lab)
 
-    if len(prefix) > 0:
-        fcols = [col for col in fdata.columns if col.startswith(prefix)]
-    else:
-        fcols = fdata.columns
-
-    if match_feature_count:
-        assert len(fcols) == len(expected_feature_list)
-
-    for col in expected_feature_list:
-        assert prefix + col in fcols
-
-class TestFeatureExtraction:
-
-    def test_setup(self):
-
-        # define parameters
-        args = {
-            'reference_mu_lab': [8.63234435, -0.11501964, 0.03868433],
-            'reference_std_lab': [0.57506023, 0.10403329, 0.01364062],
-
-            'min_radius': 12,
-            'max_radius': 30,
-            'foreground_threshold': 60,
-            'min_nucleus_area': 80,
-            'local_max_search_radius': 10,
-        }
-
-        args = collections.namedtuple('Parameters', args.keys())(**args)
-
-        # .ndpi dosyasını OpenSlide kullanarak oku
-        ndpi_file_path = '/Users/gozdesimsek/Desktop/thesis/Thesiscode/HistomicsTK/tests/7316UP-3639.ndpi'  # ndpi dosya yolu
-        slide = openslide.OpenSlide(ndpi_file_path)
-
-        # Görüntüyü oku (küçük çözünürlükte okuma yapabilirsiniz)
-        level = 0  # Bu, okuyacağınız çözünürlük seviyesidir. (0 en yüksek çözünürlük)
-        im_input = np.array(slide.read_region((0, 0), level, slide.level_dimensions[level]))[:, :, :3]
-
-        # perform color normalization
-        im_input_nmzd = htk_cnorm.reinhard(
-            im_input, args.reference_mu_lab, args.reference_std_lab)
-
-        # perform color decovolution
-        w = htk_cdeconv.rgb_separate_stains_macenko_pca(
-            im_input_nmzd, im_input_nmzd.max())
-
+        # Perform color deconvolution
+        w = htk_cdeconv.rgb_separate_stains_macenko_pca(im_input_nmzd, im_input_nmzd.max())
         im_stains = htk_cdeconv.color_deconvolution(im_input_nmzd, w).Stains
 
-        nuclei_channel = htk_cdeconv.find_stain_index(
-            htk_cdeconv.stain_color_map['hematoxylin'], w)
-
+        # Nuclei stain
+        nuclei_channel = htk_cdeconv.find_stain_index(htk_cdeconv.stain_color_map['hematoxylin'], w)
         im_nuclei_stain = im_stains[:, :, nuclei_channel].astype(float)
 
-        cytoplasm_channel = htk_cdeconv.find_stain_index(
-            htk_cdeconv.stain_color_map['eosin'], w)
+        # Cytoplasm stain
+        cytoplasm_channel = htk_cdeconv.find_stain_index(htk_cdeconv.stain_color_map['eosin'], w)
+        im_cytoplasm_stain = im_stains[:, :, cytoplasm_channel].astype(float)
 
-        im_cytoplasm_stain = im_stains[:, :, cytoplasm_channel].astype(
-            float)
-
-        # segment nuclei
+        # Nuclei segmentation
         im_nuclei_seg_mask = htk_nuclear.detect_nuclei_kofahi(
             im_nuclei_stain,
             im_nuclei_stain < args.foreground_threshold,
@@ -96,98 +55,126 @@ class TestFeatureExtraction:
             args.local_max_search_radius,
         )
 
-        # perform connected component analysis
+        # Connected component analysis
         nuclei_rprops = skimage.measure.regionprops(im_nuclei_seg_mask)
 
-        # compute nuclei features
+        # Compute nuclei features
         fdata_nuclei = htk_features.compute_nuclei_features(
             im_nuclei_seg_mask, im_nuclei_stain.astype(np.uint8),
-            im_cytoplasm=im_cytoplasm_stain.astype(np.uint8))
+            im_cytoplasm=im_cytoplasm_stain.astype(np.uint8)
+        )
 
-        cfg.im_input = im_input
-        cfg.im_input_nmzd = im_input_nmzd
+        # Save results in the global config
         cfg.im_nuclei_stain = im_nuclei_stain
         cfg.im_nuclei_seg_mask = im_nuclei_seg_mask
         cfg.nuclei_rprops = nuclei_rprops
         cfg.fdata_nuclei = fdata_nuclei
 
-    def test_compute_features(self):
+    def compute_features(self):
+        # Compute all features
+        self.intensity_features = htk_features.compute_intensity_features(cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain.astype(np.uint8))
+        self.morphometry_features = htk_features.compute_morphometry_features(cfg.im_nuclei_seg_mask)
+        self.halalick_features = htk_features.compute_haralick_features(cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain.astype(np.uint8))
+        self.gradient_features = htk_features.compute_gradient_features(cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain)
+        self.fsd_features = htk_features.compute_fsd_features(cfg.im_nuclei_seg_mask, Fs=6)
 
-        # Ortak özelliklerin listesini tutmak için bir dataframe oluştur
-        all_features = pd.DataFrame()
+    def save_features_to_csv(self, output_dir, image_name, folder_name):
+        # Combine all features into one dataframe
+        all_features = pd.concat([self.intensity_features, 
+                                  self.morphometry_features, 
+                                  self.halalick_features,
+                                  self.gradient_features,
+                                  self.fsd_features], 
+                                 axis=1)
+        
+        # Define the output folder for this image
+        folder_output_dir = os.path.join(output_dir, folder_name)
+        if not os.path.exists(folder_output_dir):
+            os.makedirs(folder_output_dir)
+        
+        # Save the dataframe as a CSV file in the corresponding folder
+        output_csv_path = os.path.join(folder_output_dir, f"{image_name}_features.csv")
+        all_features.to_csv(output_csv_path, index=True)
 
-        # Intensity features
-        intensity_feature_list = [
-            'Intensity.Min',
-            'Intensity.Max',
-            'Intensity.Mean',
-            'Intensity.Median',
-            'Intensity.MeanMedianDiff',
-            'Intensity.Std',
-            'Intensity.IQR',
-            'Intensity.MAD',
-            'Intensity.Skewness',
-            'Intensity.Kurtosis',
-            'Intensity.HistEnergy',
-            'Intensity.HistEntropy',
-        ]
+    def aggregate_features(self, all_feature_dfs, folder_name):
+        # Combine all feature dataframes and calculate column-wise means
+        combined_df = pd.concat(all_feature_dfs, axis=0)
+        
+        # Calculate column-wise means for the aggregated features
+        mean_features = combined_df.mean(axis=0)
+        
+        # Convert the mean features to a DataFrame with columns as features
+        mean_features_df = pd.DataFrame(mean_features).T
+        
+        # Add the folder name (ImageID) as the first column
+        mean_features_df.insert(0, 'ImageID', folder_name)
+        
+        # Return the DataFrame with features as columns
+        return mean_features_df
 
-        fdata_intensity = htk_features.compute_intensity_features(
-            cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain)
+def process_all_images(input_dir, output_dir):
+    all_feature_dfs = []
+    
+    # Define parameters
+    args = {
+        'reference_mu_lab': [8.63234435, -0.11501964, 0.03868433],
+        'reference_std_lab': [0.57506023, 0.10403329, 0.01364062],
+        'min_radius': 12,
+        'max_radius': 30,
+        'foreground_threshold': 60,
+        'min_nucleus_area': 80,
+        'local_max_search_radius': 10,
+    }
+    args = collections.namedtuple('Parameters', args.keys())(**args)
 
-        check_fdata_sanity(fdata_intensity, intensity_feature_list)
-        all_features = pd.concat([all_features, fdata_intensity], axis=1)
+    # Loop through all subfolders (RadiologyIDs) in the input directory
+    for folder_name in os.listdir(input_dir):
+        folder_path = os.path.join(input_dir, folder_name)
 
-        # Haralick features
-        haralick_feature_list = [
-            'Haralick.ASM', 'Haralick.Contrast', 'Haralick.Correlation', 'Haralick.SumOfSquares',
-            'Haralick.IDM', 'Haralick.SumAverage', 'Haralick.SumVariance', 'Haralick.SumEntropy',
-            'Haralick.Entropy', 'Haralick.DifferenceVariance', 'Haralick.DifferenceEntropy',
-            'Haralick.IMC1', 'Haralick.IMC2'
-        ]
+        # Only process folders that contain PNG files
+        if os.path.isdir(folder_path):
+            print(f"Processing folder {folder_name}...")
+            all_feature_dfs_for_folder = []
+            
+            # Loop through all PNG files in the subfolder
+            for image_name in os.listdir(folder_path):
+                if image_name.endswith(".png"):
+                    print(f"Processing {image_name}...")
+                    input_image_path = os.path.join(folder_path, image_name)
+                    fe = FeatureExtraction()
+                    
+                    # Setup image and compute features
+                    fe.setup_image(input_image_path, args)
+                    fe.compute_features()
 
-        expected_haralick_list = [f + '.Mean' for f in haralick_feature_list] + \
-                                 [f + '.Range' for f in haralick_feature_list]
+                    # Save individual image features to CSV in the corresponding folder
+                    fe.save_features_to_csv(output_dir, image_name, folder_name)
 
-        fdata_haralick = htk_features.compute_haralick_features(
-            cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain.astype(np.uint8))
+                    # Add to feature list for aggregation
+                    all_feature_dfs_for_folder.append(fe.intensity_features)
+                    all_feature_dfs_for_folder.append(fe.morphometry_features)
+                    all_feature_dfs_for_folder.append(fe.halalick_features)
+                    all_feature_dfs_for_folder.append(fe.gradient_features)
+                    all_feature_dfs_for_folder.append(fe.fsd_features)
 
-        check_fdata_sanity(fdata_haralick, expected_haralick_list)
-        all_features = pd.concat([all_features, fdata_haralick], axis=1)
-
-        # Gradient features
-        gradient_feature_list = [
-            'Gradient.Mag.Mean', 'Gradient.Mag.Std', 'Gradient.Mag.Skewness', 
-            'Gradient.Mag.Kurtosis', 'Gradient.Mag.HistEntropy', 
-            'Gradient.Mag.HistEnergy', 'Gradient.Canny.Sum', 'Gradient.Canny.Mean'
-        ]
-
-        fdata_gradient = htk_features.compute_gradient_features(
-            cfg.im_nuclei_seg_mask, cfg.im_nuclei_stain)
-
-        check_fdata_sanity(fdata_gradient, gradient_feature_list)
-        all_features = pd.concat([all_features, fdata_gradient], axis=1)
-
-        # Morphometry features
-        morphometry_feature_list = [
-            'Orientation.Orientation', 'Size.Area', 'Size.ConvexHullArea', 'Size.MajorAxisLength',
-            'Size.MinorAxisLength', 'Size.Perimeter', 'Size.Eccentricity', 'Size.Solidity',
-            'Size.Extent', 'Shape.FilledArea', 'Shape.EulerNumber', 'Shape.EquivalentDiameter',
-            'Shape.Orientation'
-        ]
-
-        fdata_morphometry = htk_features.compute_morphometry_features(
-            cfg.im_nuclei_seg_mask, cfg.nuclei_rprops)
-
-        check_fdata_sanity(fdata_morphometry, morphometry_feature_list)
-        all_features = pd.concat([all_features, fdata_morphometry], axis=1)
-
-        # Tüm özellikleri CSV'ye kaydet
-        output_csv = os.path.join(tempfile.gettempdir(), 'combined_features.csv')
-        all_features.to_csv(output_csv, index=False)
-        print(f'Tüm özellikler {output_csv} dosyasına kaydedildi.')
+            # Aggregate all features across images in the folder
+            mean_features = fe.aggregate_features(all_feature_dfs_for_folder, folder_name)
+            
+            # Save mean features to CSV (with features as columns) inside the corresponding folder
+            folder_output_dir = os.path.join(output_dir, folder_name)
+            if not os.path.exists(folder_output_dir):
+                os.makedirs(folder_output_dir)
+            
+            mean_features.to_csv(os.path.join(folder_output_dir, f"{folder_name}_mean_features.csv"), index=False)
 
 if __name__ == '__main__':
-    test = TestFeatureExtraction()
-    test.test_setup()
-    test.test_compute_features()
+    # Define the input and output directories
+    input_dir = './slides'  # Replace with your directory containing folders with PNG files
+    output_dir = './output'  # Replace with your desired output directory
+
+    # Ensure the output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Process all images in the input directory
+    process_all_images(input_dir, output_dir)
