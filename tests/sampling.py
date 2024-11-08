@@ -4,14 +4,8 @@ from PIL import Image
 import os
 import random
 
-def create_and_save_valid_patches(slide_path, patch_size=1024, step_size=1024, num_patches=10, tissue_threshold=0.05, output_dir="slides"):
-    """
-    OpenSlide ile slaytı patch'lere bölme ve yalnızca %5'ten fazla doku içeren rastgele patch'leri kaydetme
-    """
-    # Slide'ın dosya adını almak (uzantı hariç)
+def create_and_save_valid_patches_grid(slide_path, patch_size=1024, num_patches=10, tissue_threshold=0.05, output_dir="slides"):
     slide_name = os.path.splitext(os.path.basename(slide_path))[0]
-    
-    # Çıktı dizinini, slide'ın adıyla aynı olacak şekilde oluştur
     output_dir = os.path.join(output_dir, slide_name)
     
     if not os.path.exists(output_dir):
@@ -20,37 +14,45 @@ def create_and_save_valid_patches(slide_path, patch_size=1024, step_size=1024, n
     slide = openslide.OpenSlide(slide_path)
     slide_width, slide_height = slide.dimensions
 
-    # Num_patches kadar geçerli patch bulmaya çalış
+    # Patch'ler için grid koordinatları oluştur
+    grid_x = list(range(0, slide_width - patch_size + 1, patch_size))
+    grid_y = list(range(0, slide_height - patch_size + 1, patch_size))
+    grid_positions = [(x, y) for x in grid_x for y in grid_y]
+    
+    random.shuffle(grid_positions)  # Rastgele seçimi kolaylaştırmak için karıştırın
+
     patches_saved = 0
-    attempts = 0  # Rastgele seçim sayısını izleyelim
-    while patches_saved < num_patches and attempts < num_patches * 10:
-        # Rastgele bir koordinat seç
-        random_x = random.randint(0, slide_width - patch_size)
-        random_y = random.randint(0, slide_height - patch_size)
-        
-        # Patch'i al
+    used_positions = set()  # Kaydedilen koordinatları takip etmek için küme
+
+    for (random_x, random_y) in grid_positions:
+        if patches_saved >= num_patches:
+            break
+
+        # Eğer pozisyon daha önce kullanıldıysa, atla
+        if (random_x, random_y) in used_positions:
+            continue
+
         patch = slide.read_region((random_x, random_y), 0, (patch_size, patch_size))
         patch = patch.convert("RGB")
         patch_np = np.array(patch)
-
-        # Doku yüzdesini hesapla
         tissue_percentage = calculate_tissue_percentage(patch_np)
 
-        # Eğer doku yüzdesi eşik değerinden büyükse kaydet
+        # Yeterli doku yüzdesine sahip yamaları kaydet
         if tissue_percentage > tissue_threshold:
             patch_path = os.path.join(output_dir, f"patch_{random_y}_{random_x}.png")
             Image.fromarray(patch_np).save(patch_path)
             print(f"Saved patch: {patch_path}")
-
-            patches_saved += 1  # Başarıyla kaydedilen patch sayısını artır
-        attempts += 1  # Rastgele seçimlerin sayısını artır
+            patches_saved += 1
+            used_positions.add((random_x, random_y))  # Kullanılan pozisyonu kaydet
 
     if patches_saved < num_patches:
-        print(f"Only {patches_saved} valid patches were found after {attempts} attempts.")
+        print(f"Only {patches_saved} valid patches were found in grid-based approach.")
 
 def calculate_tissue_percentage(patch_np, threshold=200):
     """
-    Patch içinde doku yüzdesini hesapla
+    Patch içinde doku yüzdesini hesaplamak 
+    threshold: bir pikselin RGB si 200 den düşükse -> doku içeriyor 
+    threshold üstündeki değerler açık ve beyaz renkli kısımları (doku hariç) temsil etmektedir. örneğin RGB(255, 255, 255)
     """
     tissue_pixels = np.sum(np.all(patch_np < threshold, axis=-1))
     total_pixels = patch_np.shape[0] * patch_np.shape[1]
@@ -58,5 +60,5 @@ def calculate_tissue_percentage(patch_np, threshold=200):
     return tissue_percentage
 
 # Kullanım
-slide_path = '/Users/gozdesimsek/Desktop/thesis/Thesiscode/HistomicsTK/tests/7316UP-3639.ndpi'
-create_and_save_valid_patches(slide_path, patch_size=1024, step_size=1024, num_patches=10, tissue_threshold=0.05)
+slide_path = '/Users/gozdesimsek/Desktop/thesis/Thesiscode/HistomicsTK/tests/7316UP-1206.ndpi'
+create_and_save_valid_patches_grid(slide_path, patch_size=1024, num_patches=10, tissue_threshold=0.05)
